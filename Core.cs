@@ -1,4 +1,4 @@
-﻿using MelonLoader;
+using MelonLoader;
 using UnityEngine;
 using UnityEngine.UI;
 using Il2CppTMPro;
@@ -41,6 +41,10 @@ namespace ModManager_
         private GUIStyle selectedModStyle;
         private bool isCapturingKey = false;
         private MelonPreferences_Entry currentCapturingEntry = null;
+        private float dragStartValue = 0f;
+        private bool isDragging = false;
+        private Vector2 dragStartMousePos;
+        private bool buttonInitialized = false;
 
         private void ToggleGui()
         {
@@ -51,12 +55,17 @@ namespace ModManager_
         {
             if (sceneName == "Main")
             {
-                // Try to find the settings button using multiple methods
-                FindSettingsButton();
+                // Clear button references when entering main scene
+                settingsButton = null;
+                modSettingsButton = null;
+                buttonInitialized = false;
             }
             else if (sceneName == "Menu")
             {
-                MelonCoroutines.Start(MenuDelayedInit());
+                if (!buttonInitialized)
+                {
+                    MelonCoroutines.Start(MenuDelayedInit());
+                }
             }
         }
 
@@ -64,11 +73,23 @@ namespace ModManager_
         {
             // Wait for 3 seconds before trying to find the settings button
             yield return new WaitForSeconds(3f);
-            FindSettingsButton();
+            
+            // Only proceed if we haven't initialized and we're still in the menu scene
+            if (!buttonInitialized && UnityEngine.SceneManagement.SceneManager.GetActiveScene().name == "Menu")
+            {
+                FindSettingsButton();
+            }
         }
 
         private void FindSettingsButton()
         {
+            // Clean up any existing mod settings button
+            if (modSettingsButton != null)
+            {
+                GameObject.Destroy(modSettingsButton);
+                modSettingsButton = null;
+            }
+
             // Method 1: Try to find by component type and text content
             Button[] allButtons = GameObject.FindObjectsOfType<Button>();
             foreach (Button btn in allButtons)
@@ -79,6 +100,7 @@ namespace ModManager_
                 {
                     settingsButton = btn.gameObject;
                     CreateModSettingsButton();
+                    buttonInitialized = true;
                     return;
                 }
 
@@ -88,12 +110,21 @@ namespace ModManager_
                 {
                     settingsButton = btn.gameObject;
                     CreateModSettingsButton();
+                    buttonInitialized = true;
                     return;
                 }
             }
 
             // If we couldn't find the settings button, create a floating button instead
             LoggerInstance.Msg("Could not find settings button, will use floating button instead.");
+            CreateFloatingModSettingsButton();
+            buttonInitialized = true;
+        }
+
+        private void CreateFloatingModSettingsButton()
+        {
+            // Implementation for creating a floating button when settings button can't be found
+            // This is a fallback method that you can implement if needed
         }
 
         private void CreateModSettingsButton()
@@ -354,6 +385,30 @@ namespace ModManager_
                 normal = {
                     background = CreateRoundedRectTexture(2, 2, new Color(0.15f, 0.15f, 0.15f, 0.95f), 5),
                     textColor = Color.white
+                }
+            };
+
+            // Add slider styles
+            GUI.skin.horizontalSlider = new GUIStyle(GUI.skin.horizontalSlider)
+            {
+                fixedHeight = 20,
+                normal = {
+                    background = CreateRoundedRectTexture(2, 2, new Color(0.2f, 0.2f, 0.2f, 0.9f), 3)
+                }
+            };
+
+            GUI.skin.horizontalSliderThumb = new GUIStyle(GUI.skin.horizontalSliderThumb)
+            {
+                fixedHeight = 20,
+                fixedWidth = 20,
+                normal = {
+                    background = CreateRoundedRectTexture(2, 2, new Color(0.3f, 0.3f, 0.3f, 1f), 3)
+                },
+                hover = {
+                    background = CreateRoundedRectTexture(2, 2, new Color(0.35f, 0.35f, 0.35f, 1f), 3)
+                },
+                active = {
+                    background = CreateRoundedRectTexture(2, 2, new Color(0.4f, 0.4f, 0.4f, 1f), 3)
                 }
             };
 
@@ -664,10 +719,8 @@ namespace ModManager_
 
                 // Entry control
                 GUILayout.BeginHorizontal();
-                GUILayout.Space(20); // Indent the control
+                GUILayout.Space(20);
 
-                string key = $"{entry.Category.Identifier}.{entry.Identifier}";
-                
                 if (entry.BoxedValue is bool boolValue)
                 {
                     bool newValue = GUILayout.Toggle(boolValue, boolValue ? "Enabled" : "Disabled", buttonStyle);
@@ -679,63 +732,117 @@ namespace ModManager_
                 }
                 else if (entry.BoxedValue is KeyCode keyCode)
                 {
-                    GUI.color = isCapturingKey && currentCapturingEntry == entry ? Color.yellow : Color.white;
-                    
-                    string buttonText = isCapturingKey && currentCapturingEntry == entry 
-                        ? "Press any key..." 
-                        : keyCode.ToString();
-
-                    if (GUILayout.Button(buttonText, buttonStyle, GUILayout.Width(200)))
+                    // Handle KeyCode preferences
+                    if (isCapturingKey && currentCapturingEntry == entry)
                     {
-                        if (!isCapturingKey)
-                        {
-                            isCapturingKey = true;
-                            currentCapturingEntry = entry;
-                        }
+                        GUI.color = Color.yellow;
+                        GUILayout.Label("Press any key...", buttonStyle);
+                        GUI.color = Color.white;
                     }
-
-                    GUI.color = Color.white;
+                    else if (GUILayout.Button(keyCode.ToString(), buttonStyle))
+                    {
+                        isCapturingKey = true;
+                        currentCapturingEntry = entry;
+                    }
                 }
-                else if (entry.BoxedValue is float || entry.BoxedValue is int)
+                else if (entry.BoxedValue is float || entry.BoxedValue is int || entry.BoxedValue is double)
                 {
-                    float currentValue = entry.BoxedValue is float ? (float)entry.BoxedValue : (int)entry.BoxedValue;
-                    
-                    // Get min/max values from attributes or use defaults
-                    float minValue = -100f;
-                    float maxValue = 100f;
-                    
-                    var valueRange = entry.GetType().GetProperty("ValueRange")?.GetValue(entry);
-                    if (valueRange != null)
+                    float minValue = float.MinValue;
+                    float maxValue = float.MaxValue;
+                    bool hasValueRange = false;
+                    bool isFloat = entry.BoxedValue is float;
+                    bool isInt = entry.BoxedValue is int;
+                    float step = isInt ? 1f : 0.1f;
+
+                    // Get value range if available
+                    if (entry.Validator != null && entry.Validator.GetType().IsGenericType && 
+                        entry.Validator.GetType().GetGenericTypeDefinition() == typeof(ValueRange<>))
                     {
-                        var range = (IValueRange)valueRange;
-                        minValue = (float)range.MinValue;
-                        maxValue = (float)range.MaxValue;
+                        var validatorType = entry.Validator.GetType();
+                        var minProp = validatorType.GetProperty("Min");
+                        var maxProp = validatorType.GetProperty("Max");
+                        
+                        if (minProp != null && maxProp != null)
+                        {
+                            minValue = Convert.ToSingle(minProp.GetValue(entry.Validator));
+                            maxValue = Convert.ToSingle(maxProp.GetValue(entry.Validator));
+                            hasValueRange = true;
+
+                            // Calculate appropriate step based on range size
+                            float range_size = maxValue - minValue;
+                            
+                            if (range_size <= 1)
+                            {
+                                step = isFloat ? 0.1f : (isInt ? 1f : 0.1f);
+                            }
+                            else if (range_size <= 10)
+                            {
+                                step = isFloat ? 0.5f : (isInt ? 1f : 0.5f);
+                            }
+                            else if (range_size <= 100)
+                            {
+                                step = isFloat ? 1f : (isInt ? 1f : 1f);
+                            }
+                            else if (range_size <= 1000)
+                            {
+                                step = isFloat ? 5f : (isInt ? 10f : 5f);
+                            }
+                            else if (range_size <= 10000)
+                            {
+                                step = isFloat ? 50f : (isInt ? 50f : 50f);
+                            }
+                            else
+                            {
+                                step = isInt ? 100f : (range_size / 100f);
+                            }
+                            
+                            if (isInt) step = Mathf.Max(1f, Mathf.Floor(step));
+                        }
                     }
 
-                    // Display current value
-                    GUILayout.Label(currentValue.ToString("F2"), GUILayout.Width(50));
-                    
-                    // Calculate steps for increment of 5
-                    float step = 5f;
-                    float newValue = GUILayout.HorizontalSlider(currentValue, minValue, maxValue, GUILayout.Width(200));
-                    newValue = Mathf.Round(newValue / step) * step; // Round to nearest increment
-                    
-                    if (Mathf.Abs(newValue - currentValue) >= 0.01f) // Small epsilon for float comparison
+                    float currentValue = Convert.ToSingle(entry.BoxedValue);
+                    string valueFormat = (!isInt && step < 1) ? "F2" : "F0";
+                    GUILayout.Label(currentValue.ToString(valueFormat), GUILayout.Width(50));
+
+                    if (GUILayout.Button("-", buttonStyle, GUILayout.Width(30)))
                     {
-                        // Convert to the correct type before setting BoxedValue
-                        if (entry.BoxedValue is float)
+                        if (entry.BoxedValue is double)
                         {
-                            entry.BoxedValue = newValue;
+                            double newValue = Math.Max(Convert.ToDouble(minValue), Convert.ToDouble(currentValue) - Convert.ToDouble(step));
+                            if (isInt) newValue = Math.Floor(newValue);
+                            SetEntryValue(entry, newValue);
                         }
-                        else if (entry.BoxedValue is int)
+                        else
                         {
-                            entry.BoxedValue = (int)newValue;
+                            float newValue = Mathf.Max(minValue, currentValue - step);
+                            if (isInt) newValue = Mathf.Floor(newValue);
+                            SetEntryValue(entry, isInt ? (int)newValue : newValue);
                         }
-                        MelonPreferences.Save();
                     }
-                    
-                    // Display min/max values
-                    GUILayout.Label($"[{minValue:F1} to {maxValue:F1}]", GUILayout.Width(100));
+
+                    if (GUILayout.Button("+", buttonStyle, GUILayout.Width(30)))
+                    {
+                        if (entry.BoxedValue is double)
+                        {
+                            double newValue = Math.Min(Convert.ToDouble(maxValue), Convert.ToDouble(currentValue) + Convert.ToDouble(step));
+                            if (isInt) newValue = Math.Floor(newValue);
+                            SetEntryValue(entry, newValue);
+                        }
+                        else
+                        {
+                            float newValue = Mathf.Min(maxValue, currentValue + step);
+                            if (isInt) newValue = Mathf.Floor(newValue);
+                            SetEntryValue(entry, isInt ? (int)newValue : newValue);
+                        }
+                    }
+
+                    // Range display
+                    if (hasValueRange)
+                    {
+                        string rangeFormat = (!isInt && step < 1) ? "F2" : "F0";
+                        GUILayout.Label($"[{minValue.ToString(rangeFormat)} - {maxValue.ToString(rangeFormat)}]", GUILayout.Width(120));
+                    }
+                    GUILayout.Label($"Step: {step.ToString(valueFormat)}", GUILayout.Width(70));
                 }
 
                 GUILayout.EndHorizontal();
@@ -744,6 +851,37 @@ namespace ModManager_
             catch (Exception ex)
             {
                 LoggerInstance.Error($"Error in DrawPreferenceEntry: {ex}");
+            }
+        }
+
+        private void SetEntryValue(MelonPreferences_Entry entry, dynamic newValue)
+        {
+            try
+            {
+                // Handle type conversion based on the entry's actual type
+                if (entry.BoxedValue is double)
+                {
+                    entry.BoxedValue = Convert.ToDouble(newValue);
+                }
+                else if (entry.BoxedValue is float)
+                {
+                    entry.BoxedValue = Convert.ToSingle(newValue);
+                }
+                else if (entry.BoxedValue is int)
+                {
+                    entry.BoxedValue = Convert.ToInt32(newValue);
+                }
+                else
+                {
+                    // For other types, try direct assignment
+                    entry.BoxedValue = newValue;
+                }
+                
+                MelonPreferences.Save();
+            }
+            catch (Exception ex)
+            {
+                LoggerInstance.Error($"Error setting value: {ex}");
             }
         }
 
@@ -780,6 +918,17 @@ namespace ModManager_
                     .OrderBy(x => Path.GetFileName(x.path))
                     .ToList();
             }
+        }
+
+        public override void OnApplicationQuit()
+        {
+            // Clean up any remaining UI elements
+            if (modSettingsButton != null)
+            {
+                GameObject.Destroy(modSettingsButton);
+                modSettingsButton = null;
+            }
+            buttonInitialized = false;
         }
     }
 }
